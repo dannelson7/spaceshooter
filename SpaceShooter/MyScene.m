@@ -7,12 +7,18 @@
 //
 
 @import CoreMotion;
+@import AVFoundation;
 
 #import "MyScene.h"
 #import "FMMParallaxNode.h"
 
 #define kNumAsteroids   15
 #define kNumLasers      5
+
+typedef enum {
+    kEndReasonWin,
+    kEndReasonLose
+} EndReason;
 
 @implementation MyScene
 {
@@ -26,6 +32,9 @@
     NSMutableArray *_shipLasers;
     int _nextShipLaser;
     int _lives;
+    double _gameOverTime;
+    bool _gameOver;
+    AVAudioPlayer *_backgroundAudioPlayer;
 }
 
 -(id)initWithSize:(CGSize)size {
@@ -113,6 +122,7 @@
         [self addChild:[self loadEmitterNode:@"stars3"]];
         
 #pragma mark - TBD - Start the actual game
+        [self startBackgroundMusic];
         [self startTheGame];
         
     }
@@ -133,6 +143,10 @@
 
 - (void)startTheGame
 {
+    _lives = 3;
+    double curTime = CACurrentMediaTime();
+    _gameOverTime = curTime + 30.0;
+    _gameOver = NO;
     _nextAsteroidSpawn = 0;
     
     for (SKSpriteNode *asteroid in _asteroids) {
@@ -176,7 +190,40 @@
     }
 }
 
+- (void)startBackgroundMusic
+{
+    NSError *err;
+    NSURL *file = [NSURL fileURLWithPath:[[NSBundle mainBundle] pathForResource:@"SpaceGame.caf" ofType:nil]];
+    _backgroundAudioPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:file error:&err];
+    if (err) {
+        NSLog(@"error in audio play %@",[err userInfo]);
+        return;
+    }
+    [_backgroundAudioPlayer prepareToPlay];
+    
+    // this will play the music infinitely
+    _backgroundAudioPlayer.numberOfLoops = -1;
+    [_backgroundAudioPlayer setVolume:1.0];
+    [_backgroundAudioPlayer play];
+}
+
 - (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
+    //check if they touched your Restart Label
+    for (UITouch *touch in touches) {
+        SKNode *n = [self nodeAtPoint:[touch locationInNode:self]];
+        if (n != self && [n.name isEqual: @"restartLabel"]) {
+            [[self childNodeWithName:@"restartLabel"] removeFromParent];
+            [[self childNodeWithName:@"winLoseLabel"] removeFromParent];
+            [self startTheGame];
+            return;
+        }
+    }
+    
+    //do not process anymore touches since it's game over
+    if (_gameOver) {
+        return;
+    }
+    
     /* Called when a touch begins */
     //1
     SKSpriteNode *shipLaser = [_shipLasers objectAtIndex:_nextShipLaser];
@@ -192,6 +239,7 @@
     
     //3
     CGPoint location = CGPointMake(self.frame.size.width, _ship.position.y);
+    SKAction *laserFireSoundAction = [SKAction playSoundFileNamed:@"laser_ship.caf" waitForCompletion:NO];
     SKAction *laserMoveAction = [SKAction moveTo:location duration:0.5];
     //4
     SKAction *laserDoneAction = [SKAction runBlock:(dispatch_block_t)^() {
@@ -200,7 +248,7 @@
     }];
     
     //5
-    SKAction *moveLaserActionWithDone = [SKAction sequence:@[laserMoveAction,laserDoneAction]];
+    SKAction *moveLaserActionWithDone = [SKAction sequence:@[laserFireSoundAction, laserMoveAction,laserDoneAction]];
     //6
     [shipLaser runAction:moveLaserActionWithDone withKey:@"laserFired"];
     
@@ -248,6 +296,7 @@
         SKAction *moveAsteroidActionWithDone = [SKAction sequence:@[moveAction, doneAction ]];
         [asteroid runAction:moveAsteroidActionWithDone withKey:@"asteroidMoving"];
     }
+    
     //check for laser collision with asteroid
     for (SKSpriteNode *asteroid in _asteroids) {
         if (asteroid.hidden) {
@@ -259,6 +308,8 @@
             }
             
             if ([shipLaser intersectsNode:asteroid]) {
+                SKAction *asteroidExplosionSound = [SKAction playSoundFileNamed:@"explosion_small.caf" waitForCompletion:NO];
+                [asteroid runAction:asteroidExplosionSound];
                 shipLaser.hidden = YES;
                 asteroid.hidden = YES;
                 
@@ -266,16 +317,68 @@
                 continue;
             }
         }
-        if ([_ship intersectsNode:asteroid]) {
+        if ([_ship intersectsNode:asteroid] && !_gameOver) {
             asteroid.hidden = YES;
             SKAction *blink = [SKAction sequence:@[[SKAction fadeOutWithDuration:0.1],
                                                    [SKAction fadeInWithDuration:0.1]]];
             SKAction *blinkForTime = [SKAction repeatAction:blink count:4];
-            [_ship runAction:blinkForTime];
+            SKAction *shipExplosionSound = [SKAction playSoundFileNamed:@"explosion_large.caf" waitForCompletion:NO];
+            [_ship runAction:[SKAction sequence:@[shipExplosionSound,blinkForTime]]];
             _lives--;
             NSLog(@"your ship has been hit!");
         }
     }
+    
+    // Add at end of update loop
+    if (_lives <= 0) {
+        NSLog(@"you lose...");
+        [self endTheScene:kEndReasonLose];
+    } else if (curTime >= _gameOverTime) {
+        NSLog(@"you won...");
+        [self endTheScene:kEndReasonWin];
+    }
+}
+
+- (void)endTheScene:(EndReason)endReason {
+    if (_gameOver) {
+        return;
+    }
+    
+    [self removeAllActions];
+    [self stopMonitoringAcceleration];
+    _ship.hidden = YES;
+    _gameOver = YES;
+    
+    NSString *message;
+    if (endReason == kEndReasonWin) {
+        message = @"You win!";
+    } else if (endReason == kEndReasonLose) {
+        message = @"You lost!";
+    }
+    
+    SKLabelNode *label;
+    label = [[SKLabelNode alloc] initWithFontNamed:@"Futura-CondensedMedium"];
+    label.name = @"winLoseLabel";
+    label.text = message;
+    label.scale = 0.1;
+    label.position = CGPointMake(self.frame.size.width/2, self.frame.size.height * 0.6);
+    label.fontColor = [SKColor yellowColor];
+    [self addChild:label];
+    
+    SKLabelNode *restartLabel;
+    restartLabel = [[SKLabelNode alloc] initWithFontNamed:@"Futura-CondensedMedium"];
+    restartLabel.name = @"restartLabel";
+    restartLabel.text = @"Play Again?";
+    restartLabel.scale = 0.5;
+    restartLabel.position = CGPointMake(self.frame.size.width/2, self.frame.size.height * 0.4);
+    restartLabel.fontColor = [SKColor yellowColor];
+    [self addChild:restartLabel];
+    
+    SKAction *labelScaleAction = [SKAction scaleTo:1.0 duration:0.5];
+    
+    [restartLabel runAction:labelScaleAction];
+    [label runAction:labelScaleAction];
+    
 }
 
 @end
